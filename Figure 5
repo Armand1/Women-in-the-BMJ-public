@@ -1,0 +1,239 @@
+---
+title: "analyses of particular words"
+output: html_document
+---
+
+`````{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readr)
+library(data.table)
+library(reshape2)
+library(dplyr)
+library(ggplot2)
+library(splus2R)
+library(stringi)
+library(broom)
+library(lubridate)
+library(betareg)
+library(mgcv)
+library(segmented)
+library(forcats)
+library(fmsb) # for RR risk
+`````
+
+#### preamble
+This identifies, and counts, the incidence of gender vocal papers. 
+
+#### data
+get the word count data
+```{r}
+b<-fread("BMJ_011219_wordsbypapers_edited.csv")
+```
+get dates
+```{r}
+b$pub_date<-paste(b$year, b$month, b$day, sep="-")
+b$pub_date<-as.Date(b$pub_date)
+b$dec_pub_date<-decimal_date(b$pub_date)
+```
+count the number of times each word appears. But first synonomize woman/en
+```{r}
+b<-b%>%
+select(paper_id, dec_pub_date, year, word, count)
+b$word<-ifelse(b$word=="woman", "women", b$word)
+w<-b%>%
+filter(word=="women")%>%
+group_by(paper_id, dec_pub_date, year, word)%>%
+summarize(count=sum(count))
+b1<-subset(b, word!="women")
+b1<-as.data.frame(b1)
+w<-as.data.frame(w)
+b2<-rbind(b1, w)
+```
+check total number of papers and words
+```{r}
+N_papers<-length(unique(b2$paper_id))
+N_papers
+N_words<-length(unique(b2$word))
+N_words
+```
+#### gender vocal papers
+identify the presence of gender-specific words
+```{r}
+b2$gender_word<-ifelse(b2$word=="women"|b2$word=="female"|b2$word=="sex"|b2$word=="gender", 1,0)
+```
+count gender-vocal/silent papers by year
+```{r}
+b3<-b2%>%
+group_by(year, paper_id, gender_word)%>%
+summarize(count=sum(count))
+b4<-dcast(b3, year+paper_id~gender_word, value.var="count")
+names(b4)<-c("year", "paper_id", "N_other_word", "N_gender_word")
+b4[is.na(b4)] <- 0
+b4$N_total_word<-b4$N_gender_word+b4$N_other_word
+b4$vocal<-ifelse(b4$N_gender_word>0,1,0)
+b5<-b4%>%
+group_by(year, vocal)%>%
+summarize(N_papers=length(paper_id))
+b6<-dcast(b5, year~vocal, value.var="N_papers")
+names(b6)<-c("year", "N_papers_silent", "N_papers_vocal")
+b6[is.na(b6)]<-0 
+b6$N_papers_total<-b6$N_papers_silent+b6$N_papers_vocal
+```````
+proportions gender-vocal/silent papers by year
+```{r}
+b6$F_papers_vocal<-b6$N_papers_vocal/b6$N_papers_total
+b6$sd_papers_vocal<-sqrt((b6$F_papers_vocal*(1-b6$F_papers_vocal))/b6$N_papers_total)
+b6$error_papers_vocal<- qt(0.975,df=b6$N_papers_total-1)*b6$sd_papers_vocal
+b6$F_papers_silent<-b6$N_papers_silent/b6$N_papers_total
+b6$sd_papers_silent<-sqrt((b6$F_papers_silent*(1-b6$F_papers_silent))/b6$N_papers_total)
+b6$error_papers_silent<- qt(0.975,df=b6$N_papers_total-1)*b6$sd_papers_silent
+```
+count gender-vocal/silent papers by dec_pub_date
+````````{r}
+b7<-b2%>%
+group_by(dec_pub_date, paper_id, gender_word)%>%
+summarize(count=sum(count))
+b8<-dcast(b7, dec_pub_date+paper_id~gender_word, value.var="count")
+names(b8)<-c("dec_pub_date", "paper_id", "N_other_word", "N_gender_word")
+b8[is.na(b8)] <- 0
+b8$vocal<-ifelse(b8$N_gender_word>0,1,0)
+b9<-b8%>%
+group_by(dec_pub_date, vocal)%>%
+summarize(N_papers=length(paper_id))
+b10<-dcast(b9, dec_pub_date~vocal, value.var="N_papers")
+names(b10)<-c("dec_pub_date", "N_papers_silent", "N_papers_vocal")
+b10[is.na(b10)]<-0 
+b10$N_papers_total<-b10$N_papers_silent+b10$N_papers_vocal
+b10$F_papers_vocal<-b10$N_papers_vocal/b10$N_papers_total
+b10$dec_pub_date<-as.numeric(b10$dec_pub_date)
+b10<-b10%>%
+filter(dec_pub_date!=0)# removes a few papers without proper pubdates
+`````````
+segmented glm regression. It does not like the classic (presence/absence) binomial formula, so use frequencies, with link cloglog. The basic model
+`````````{r}
+glm<-glm(F_papers_vocal~dec_pub_date, weight=N_papers_total, family=binomial(link = "cloglog"), data=b10)
+summary(glm)
+```````
+do segmented regression
+````````{r}
+glmseg1<-segmented(glm, seg.Z = ~dec_pub_date, psi=c(2005))
+glmseg2<-segmented(glm, seg.Z = ~dec_pub_date, psi=c(2005, 2008), control=seg.control(h=.1, tol=0.0001, it.max = 30,n.boot=50))
+glmseg3<-segmented(glm, seg.Z = ~dec_pub_date, psi=c(1964, 2005, 2008), control=seg.control(h=.1, tol=0.0001, it.max = 30,n.boot=50))
+glmseg4<-segmented(glm, seg.Z = ~dec_pub_date, psi=c(1958, 1964, 2005, 2008), control=seg.control(h=.1, tol=0.0001, it.max = 30,n.boot=50))
+AIC(glm, glmseg1, glmseg2, glmseg3, glmseg4)
+`````````
+a glm with four segments is preferred, but note max iterations. See "segmented" manual for discussion; indicates some instability around breakpoints. All this is getting complicated. Fit just single-break model. All of them pull out a 2005 breakpoint. 
+
+breakpoints and their confidence intervals
+```{r}
+summary(glmseg1)
+segCI<-as.data.frame(confint.segmented(glmseg1))
+segCI
+bp<-segCI[1]
+bp2<-as.data.frame(bp)
+names(bp2)<-c("dec_pub_date")
+p<-predict(glmseg1,bp2,se=TRUE, type="response")
+bp2$glmsegfit<-p$fit
+bp2$LCI<-segCI[,2]
+bp2$UCI<-segCI[,3]
+CIfirstbp<-(bp2[1,4]-bp2[1,3])/2
+CIfirstbp
+```
+get the slopes and their confidence intervals. Note that, since the second slope is expressed at the difference from the first, we need to add the two estimates together to get the second slope. difference. Also, we need to exponentiate them since they're a glm to get the odds ratio.
+```{r}
+slope<-slope(glmseg1)$dec_pub_date
+slope<-exp(slope)
+or1<-exp(coefs)[2]
+or2<-or1+exp(coefs)[3]
+or1
+or2
+CI_1<-(slope[1,5]-slope[1,4])/2
+CI_2<-(slope[2,5]-slope[2,4])/2
+CI_1
+CI_2
+````
+predict segmented regression and gam
+``````{r}
+dec_pub_date<-sort(sample(unique(b10$dec_pub_date), 300))
+pred<-as.data.frame(dec_pub_date)
+p<-predict(glmseg1,pred,se=TRUE, type="response")
+pred$glmsegfit<-p$fit
+pred$glmsegse<-p$se
+```
+stuff for plot
+```{r}
+godlee<-decimal_date(as.Date("2005-03-01"))
+```
+plot
+```{r}
+ggplot()+
+# vlines
+geom_vline(xintercept=godlee, colour="grey50", linetype="dashed")+
+#yearly estimates
+geom_point(data=b6, aes(x=year, y=F_papers_vocal), alpha=0.5, colour="hotpink2", size=2)+
+geom_errorbar(data=b6, aes(x=year, ymin=F_papers_vocal-error_papers_vocal, ymax=F_papers_vocal+error_papers_vocal), alpha=0.5, size=1, colour="hotpink2", width=1)+
+#segmented regression
+geom_line(data=pred, aes(x=dec_pub_date, y=glmsegfit,alpha=0.5), alpha=1, size=1, colour="hotpink3")+
+geom_ribbon(data=pred, aes(x=dec_pub_date, ymin=glmsegfit-glmsegse, ymax=glmsegfit+glmsegse),alpha=0.5, size=0.5, fill="hotpink3")+
+#breakpoints
+geom_point(data=bp2, aes(x=dec_pub_date, y=glmsegfit,alpha=0.5), alpha=1, size=2, colour="red")+
+geom_errorbarh(data=bp2, aes(xmin=LCI, xmax=UCI, y=glmsegfit),alpha=1,height=1,size=1, colour="red")+
+#general controls
+theme_classic()+
+scale_y_continuous(limits=c(0,1), breaks = seq(0, 1, by = 0.1))+
+scale_x_continuous(breaks = seq(1945, 2015, by = 10))+
+ylab("incidence of gender-vocal papers")+
+theme(aspect.ratio=1)
+`````````
+This reproduces Figure 5.  Note that due to the stochastic nature of the segmented regression, there may be small differences with the published figure. 
+
+### test all gender vocal papers by editors
+
+identify editors
+````````{r}
+b11<-b8%>%
+filter(dec_pub_date>=1991)
+b11$editor<-ifelse(b11$dec_pub_date<decimal_date(as.Date("2005-03-01")), "1_Smith/Abbas", "2_Godlee")
+```````````
+
+#### test whether Godlee's papers have a higher frequency of women's topics
+GLM models
+````````{r}
+m1<-glm(vocal ~ editor, family=binomial, data =b11)
+summary(m1)
+glmcoefs1<-coef(m1)
+glmcoefs1_odds<-exp(glmcoefs1)
+glmcoefs1_odds
+``````````
+get the odds ratio of the coefficient and its confidence intervals
+````````{r}
+m1coefficient<-as.numeric(exp(coef(m1))[2])
+m1coefficient
+m1CI<-mean(abs(as.numeric(exp(confint(m1))[2,])-m1coefficient))
+m1CI
+``````
+get counts
+```{r}
+b12<-b11%>%
+group_by(editor, vocal)%>%
+summarize(N_paper=length(unique(paper_id)))
+b13<-dcast(b12, editor~vocal, value.var="N_paper")
+names(b13)<-c("editor", "N_papers_silent", "N_papers_vocal")
+b13$N_papers_total<-b13$N_papers_silent+b13$N_papers_vocal
+```
+
+````{r}
+m1<-glm(cbind(N_papers_vocal, N_papers_silent) ~ editor, family=binomial, data =b13)
+summary(m1)
+`````
+
+
+proportions gender-vocal/silent papers by year
+```{r}
+b13$F_papers_vocal<-b13$N_papers_vocal/b13$N_papers_total
+b13$sd_papers_vocal<-sqrt((b13$F_papers_vocal*(1-b13$F_papers_vocal))/b13$N_papers_total)
+b13$error_papers_vocal<- qt(0.975,df=b13$N_papers_total-1)*b13$sd_papers_vocal
+b13$F_papers_silent<-b13$N_papers_silent/b13$N_papers_total
+b13$sd_papers_silent<-sqrt((b13$F_papers_silent*(1-b13$F_papers_silent))/b13$N_papers_total)
+b13$error_papers_silent<- qt(0.975,df=b13$N_papers_total-1)*b13$sd_papers_silent
+```
