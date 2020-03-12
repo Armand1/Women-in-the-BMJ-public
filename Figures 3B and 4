@@ -1,0 +1,261 @@
+---
+title: "estimating topic classes by year"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readr)
+library(data.table)
+library(reshape2)
+library(dplyr)
+library(ggplot2)
+library(splus2R)
+library(stringi)
+library(broom)
+library(lubridate)
+library(betareg)
+library(mgcv)
+```
+
+#### preamble
+This looks at the incidence of topic_classes by time.  But here we are going to discretize.  For every pubdate we pull out a topic_class. We ask:  what is the probability that it will be of topic_class x?
+
+#### data
+get the word count data
+```{r}
+a<-fread("BMJ_011219_topicprobabilities_edited.csv")
+a$V1<-NULL
+a$pub_date<-paste(a$year, a$month, a$day, sep="-")
+a$pub_date<- as.Date(a$pub_date)
+a$dec_pub_date<-decimal_date(a$pub_date)
+`````
+
+````````{r}
+a<-as.data.frame(a)
+a1<-melt(a, id.vars=c("paper_id", "journal", "article_type", "year", "month", "day", "volume", "issue", "doi", "title","pub_date","year_month", "dec_pub_date"))
+names(a1)<-c("paper_id", "journal", "article_type", "year", "month", "day", "volume", "issue", "doi", "title","pub_date","year_month", "dec_pub_date", "topic", "prob")
+```````````
+exclude non-clinical topics
+````````{r}
+b<-read.csv("BMJ_171119_topiclabels.csv")
+b1<-b[c("topic", "topic_class_no", "topic_class","topic_label","women","use")]
+b1<-subset(b1, use==1)
+a2<-merge(a1, b1, by="topic")
+``````````
+Since we have excluded some topics so let's standardize them by the total topics in each paper.
+```````{r}
+a3<-a2%>%
+group_by(paper_id)%>%
+mutate(paper_prob_sum=sum(prob))
+a3<-as.data.frame(a3)
+a3$standprob<-a3$prob/a3$paper_prob_sum
+```````
+get the summed probabilities for each paper that it is about a given topic_class
+````````{r}
+a4<-a3%>%
+group_by(year, dec_pub_date, topic_class, topic_class_no, women, paper_id)%>%
+summarize(standprob=sum(standprob))%>%
+arrange(women, topic_class_no, dec_pub_date)
+``````````
+discretize
+````````{r}
+a4$present_05<-ifelse(a4$standprob>=0.05, 1, 0)
+`````````
+get the number of papers in which a topic_class is present and absent by dec_pub_date
+``````{r}
+a5<-a4%>%
+group_by(year, women, topic_class, topic_class_no,dec_pub_date)%>%
+summarize(N_present=sum(present_05))
+````````
+now ensure that all topic_classes are evaluated at all dates, ensuring zeros instead of NAs
+````````{r}
+a6<-dcast(a5, dec_pub_date+year~topic_class, value.var="N_present")
+a6[is.na(a6)] <- 0 
+a7<-melt(a6, id.vars=c("dec_pub_date", "year"))          
+names(a7)<-c("dec_pub_date", "year", "topic_class", "N_present")  
+a8<-unique(a5[c("topic_class", "topic_class_no", "women")])         
+a9<-merge(a7, a8, by="topic_class")          
+``````````
+now get the total number of topic_classes scored at each pubdate (note, this is not the same as the number of papers; but it's the right thing to count since the number of topics scored at a given date may vary)
+```````{r}
+a10<-a9%>%
+group_by(dec_pub_date)%>%
+summarize(N_total=sum(N_present))
+a11<-merge(a9, a10, by="dec_pub_date")
+a11$N_absent<-a11$N_total-a11$N_present
+a11<-subset(a11, dec_pub_date!=0)# removes a few papers with bad pubdates
+``````````
+This runs the glm and extracts all the coefficients.
+``````{r}
+glmcoefs<-a11%>% 
+group_by(topic_class, topic_class_no)%>%
+do(glm(cbind(N_present, N_absent) ~ dec_pub_date, family=binomial, data = .)
+%>%coef %>% as_data_frame)
+glmcoefs<-as.data.frame(glmcoefs)
+glmcoefs$effect<-c("intercept", "dec_pub_date")
+glmcoefs<-dcast(glmcoefs, topic_class+topic_class_no~effect, value.var="value")%>%
+arrange(desc(dec_pub_date))
+``````````
+note that these exponents are log odds; we have to exponentiate to get odds ratios
+````````{r}
+glmcoefs$dec_pub_date_odds<-exp(glmcoefs$dec_pub_date)
+glmcoefs<-glmcoefs%>%
+arrange(desc(dec_pub_date_odds))
+head(glmcoefs)
+tail(glmcoefs)
+``````
+get the confidence intervals
+`````{r}
+glmconfint<-a11%>% 
+group_by(topic_class, topic_class_no)%>%
+do(glm(cbind(N_present, N_absent) ~ dec_pub_date, family=binomial, data = .)
+%>%confint %>% as_data_frame)
+glmconfint$term<-c("intercept", "dec_pub_date")
+glmconfint<-glmconfint%>%
+filter(term=="dec_pub_date")
+names(glmconfint)<-c("topic_class", "topic_class_no", "LCI", "UCI", "term")
+glmconfint$LCI_odds<-exp(glmconfint$LCI)
+glmconfint$UCI_odds<-exp(glmconfint$UCI)
+`````
+merge with estimates
+``````{r}
+glmcoefs<-glmcoefs%>%
+select(topic_class, dec_pub_date_odds)
+glmconfint1<-glmconfint%>%
+select(topic_class, LCI_odds, UCI_odds)
+glmconfint1$topic_class_no<-NULL
+glmconfint2<-merge(glmcoefs, glmconfint1, by="topic_class")%>%
+  arrange(desc(dec_pub_date_odds))
+glmconfint2$CI<-(glmconfint2$UCI_odds-glmconfint2$LCI_odds)/2
+glmconfint2
+``````
+get clinical trials and case estimates
+``````{r}
+clinicaltrailsandcases<-glmconfint2%>%
+  filter(topic_class=="clinical_research_trial"| topic_class=="clinical_research_case")
+clinicaltrailsandcases
+`````````````
+This function re-runs the model and gets the predictions
+``````{r}
+one_topic_class<-function(one_topic_class){
+model<- glm(cbind(N_present, N_absent) ~ dec_pub_date, data=one_topic_class,  family=binomial)
+dec_pub_date<-sort(unique(a5$dec_pub_date))
+pred<-as.data.frame(dec_pub_date)
+p1<-predict(model,pred,se=TRUE, type="response")
+pred$fit<-p1$fit
+pred$se<-p1$se
+return(pred)
+}
+`````````
+This re-runs the model over all topic_classes and gets the predictions
+`````````{r}
+r1<-a11%>%
+group_by(topic_class, topic_class_no)%>%
+do(one_topic_class(.))
+r3<-as.data.frame(r1)
+`````````
+#### model as a gam
+``````{r}
+onetopic_class<-function(onetopic_class){
+model<- gam(cbind(N_present, N_absent) ~ s(dec_pub_date, bs = 'cr'), data=onetopic_class,  family=binomial)
+dec_pub_date<-sort(unique(a11$dec_pub_date))
+pred<-as.data.frame(dec_pub_date)
+p1<-predict.gam(model,pred,se=TRUE, type="response")
+pred$fit<-p1$fit
+pred$se<-p1$se
+return(pred)
+}
+`````````
+run the model over all topic_classes
+`````````{r}
+r1<-a11%>%
+group_by(topic_class, topic_class_no)%>%
+do(onetopic_class(.))
+r2<-as.data.frame(r1)
+`````````
+
+
+#### get yearly estimates
+
+````````{r}
+a12<-a11%>%
+group_by(topic_class_no, topic_class, year)%>%
+summarize(N_present=sum(N_present), N_total=sum(N_total), F_topic_class=N_present/N_total)
+a12$sd<-sqrt((a12$F_topic_class*(1-a12$F_topic_class))/a12$N_total)
+a12$error<- qt(0.975,df=a12$N_total-1)*a12$sd
+`````````
+check to see no NA in there
+``````{r}
+check<-dcast(a12, year~topic_class, value.var="N_present")
+`````````
+make column for women as a factor 
+```````{r}
+b3<-unique(b1[c("topic_class_no", "women")])
+a12<-merge(a12, b3, by="topic_class_no")
+r2<-merge(r2, b3, by="topic_class_no")
+#r3<-merge(r3, b3, by="topic_class_no")
+`````````
+
+
+#### plot figure 4
+
+get data for plotting
+
+`````{r}
+a13<-subset(a12, women==1)
+r2a<-subset(r2, women==1)
+````````
+
+```````{r}
+# make 15 x 15 inches
+cols<-c("hotpink2")
+godlee<-decimal_date(as.Date("2005-03-01"))
+ggplot()+
+geom_point(data=a13, aes(x=year, y=F_topic_class, colour=as.factor(women)), alpha=0.5, size=2)+
+geom_errorbar(data=a13, aes(x=year, ymin=F_topic_class-error, ymax=F_topic_class+error, colour=as.factor(women)), alpha=0.5, size=1, width=2)+
+geom_line(data=r2a, aes(x=dec_pub_date, y=fit, colour=as.factor(women)), alpha=1, size=1)+
+geom_ribbon(data=r2a, aes(x=dec_pub_date, ymin=fit-se, ymax=fit+se, fill=as.factor(women)),alpha=0.5, size=1)+
+theme_classic()+
+scale_colour_manual(values=cols)+
+scale_fill_manual(values=cols)+
+guides(colour=FALSE, fill=FALSE)+
+scale_x_continuous(breaks = seq(1945, 2015, by = 10))+
+theme(aspect.ratio=1)+
+geom_vline(xintercept = godlee, colour="grey50", size=1, linetype="dashed")+
+facet_wrap(~topic_class_no, ncol=3, scale="free_y", labeller = labeller(topic_class_no=labels))
+``````````
+
+This reproduces Figure 4
+
+`````{r}
+a13<-subset(a12,topic_class=="clinical_research_trial"| topic_class=="clinical_research_case")
+r2a<-subset(r2,topic_class=="clinical_research_trial"| topic_class=="clinical_research_case")
+r3a<-subset(r3,topic_class=="clinical_research_trial"| topic_class=="clinical_research_case")
+````````
+
+#### plot figure 3B
+```````{r}
+# make 5x5 inches
+cols<-c("grey75","grey25")
+ggplot()+
+#yearly estimates
+geom_point(data=a13, aes(x=year, y=F_topic_class, colour=as.factor(topic_class)), alpha=0.5, size=2)+
+geom_errorbar(data=a13, aes(x=year, ymin=F_topic_class-error, ymax=F_topic_class+error, colour=as.factor(topic_class)), alpha=0.5, size=1, width=2)+
+#gam fit
+geom_line(data=r2a, aes(x=dec_pub_date, y=fit, colour=as.factor(topic_class)), alpha=1, size=1)+
+geom_ribbon(data=r2a, aes(x=dec_pub_date, ymin=fit-se, ymax=fit+se, fill=as.factor(topic_class)),alpha=0.5, size=1)+
+#glm fit
+geom_line(data=r3a, aes(x=dec_pub_date, y=fit, colour=as.factor(topic_class)), alpha=1, size=1)+
+geom_ribbon(data=r3a, aes(x=dec_pub_date, ymin=fit-se, ymax=fit+se, fill=as.factor(topic_class)),alpha=0.5, size=1)+
+#theme
+theme_classic()+
+guides(colour=FALSE, fill=FALSE)+
+scale_colour_manual(values=cols)+
+scale_fill_manual(values=cols)+
+scale_y_continuous(limits=c(0, 0.18), breaks = seq(0, 0.18, by = 0.05))+
+scale_x_continuous(breaks = seq(1945, 2015, by = 10))+
+theme(aspect.ratio=1)
+`````````
+
+This reproduces figure 3B
