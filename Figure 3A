@@ -1,0 +1,150 @@
+---
+title: "Incidence of women's topics by pubdate"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readr)
+library(data.table)
+library(reshape2)
+library(dplyr)
+library(ggplot2)
+library(splus2R)
+library(stringi)
+library(broom)
+library(lubridate)
+library(betareg)
+library(mgcv)
+library(segmented)
+library(stringr)
+library(tidyr)
+```
+
+#### preamble
+This looks at the incidence of aggregated women's topics by pubdate. 
+In this method, we will first get the sum of all women's topics --- treat it as a super topic, discretize, and then ask how the incidence based on counts changes.
+#### data
+get topic probability data
+```{r}
+a<-fread("BMJ_011219_topicprobabilities_edited.csv")
+a$V1<-NULL
+a$pub_date<-paste(a$year, a$month, a$day, sep="-")
+a$pub_date<- as.Date(a$pub_date)
+a$dec_pub_date<-decimal_date(a$pub_date)
+options(max.print = 100000)
+`````
+head(a)
+```{r}
+a<-as.data.frame(a)
+a1<-a[c(1,4, 11, 413, 13:412)]
+a1<-melt(a1, id.vars=c("paper_id", "year", "pub_date", "dec_pub_date"))
+names(a1)<-c("paper_id", "year", "pub_date", "dec_pub_date", "topic", "prob")
+```
+include only use
+```{r}
+b<-read.csv("BMJ_171119_topiclabels.csv")
+b1<-b[c("topic", "topic_class_no","topic_label","women","use")]
+b1<-subset(b1, use==1)
+a2<-merge(a1, b1, by="topic")
+```
+Since we have excluded some topics so let's standardize them by the total topics in each paper.
+```{r}
+a3<-a2%>%
+group_by(paper_id)%>%
+mutate(paper_prob_sum=sum(prob), standprob=prob/paper_prob_sum, sum_standprob=sum(standprob))%>%
+arrange(dec_pub_date)
+```
+
+```{r}
+a4<-a3%>%
+group_by(dec_pub_date, year, paper_id, women)%>%
+summarize(standprob=sum(standprob))
+````
+discretize
+```{r}
+a4$present_05<-ifelse(a4$standprob>=0.05, 1, 0)
+```
+
+```{r}
+a5<-a4%>%
+group_by(dec_pub_date, women)%>%
+summarize(N_papers=sum(present_05))
+a6<-dcast(a5, dec_pub_date~women, value.var="N_papers")
+names(a6)<-c("dec_pub_date", "N_other", "N_women")
+```
+GLM models
+```{r}
+glm<-glm(cbind(N_women,N_other) ~ dec_pub_date, family=binomial, data =a6)
+summary(glm)
+```
+get the odds ratio of the coefficient and its confidence intervals
+```{r}
+glmcoefficient<-as.numeric(exp(coef(glm))[2])
+glmcoefficient
+glmCI<-mean(abs(as.numeric(exp(confint(glm))[2,])-glmcoefficient))
+glmCI
+```
+GAM model
+```{r}
+gam<-gam(cbind(N_women,N_other) ~ s(dec_pub_date), family=binomial, data =a6)
+summary(gam)
+```
+predict
+```{r}
+dec_pub_date<-sort(unique(c(a6$dec_pub_date)))
+pred<-as.data.frame(dec_pub_date)
+p1<-predict(glm,pred,se=TRUE, type="response")
+pred$glmfit<-p1$fit
+pred$glmse<-p1$se
+p2<-predict(gam,pred,se=TRUE, type="response")
+pred$gamfit<-p2$fit
+pred$gamse<-p2$se
+write.csv(pred, "glm_gam_fits_aggregatedwomentopics.csv", row.names = FALSE)
+```
+group by year
+```{r}
+a7<-a4%>%
+group_by(year, women)%>%
+summarize(N_papers=sum(present_05))
+a8<-dcast(a7, year~women, value.var="N_papers")
+names(a8)<-c("year", "N_other", "N_women")
+a8$N_total<-a8$N_other+a8$N_women
+a8$F_women<-a8$N_women/a8$N_total
+a8$sd_women<-sqrt((a8$F_women*(1-a8$F_women))/a8$N_total)
+a8$error<- qt(0.975,df=a8$N_total-1)*a8$sd_women
+a8<-as.data.frame(a8)
+```
+
+```{r}
+#col<-c("hotpink2", "blue")
+godlee<-decimal_date(as.Date("2005-03-01"))
+ggplot()+
+#data  
+geom_point(data=a8, aes(x=year, y=F_women), alpha=0.5, colour="hotpink2", size=2)+
+geom_errorbar(data=a8, aes(x=year, ymin=F_women-error, ymax=F_women+error), alpha=0.5, colour="hotpink2", size=1, width=1)+
+
+#gam
+geom_line(data=pred, aes(x=dec_pub_date, y=gamfit), size=1, colour="hotpink2")+
+geom_ribbon(data=pred, aes(x=dec_pub_date, ymin=gamfit-glmse, ymax=gamfit+gamse),alpha=0.5, colour="NA", fill="hotpink2")+
+#glm
+geom_line(data=pred, aes(x=dec_pub_date, y=glmfit), size=1, colour="hotpink4")+
+geom_ribbon(data=pred, aes(x=dec_pub_date, ymin=glmfit-glmse, ymax=glmfit+glmse),alpha=0.5, colour="NA", fill="hotpink2")+
+##other
+xlab("year")+
+ylab("incidence of women's topics")+
+scale_y_continuous(limits=c(0, 0.25), breaks = seq(0, 0.25, by = 0.05))+
+scale_x_continuous(breaks = seq(1945, 2015, by = 10))+
+theme(aspect.ratio=1)+
+theme_classic()+
+geom_vline(xintercept = godlee, colour="grey50", size=1, linetype="dashed")+
+guides(colour=FALSE)
+```
+
+group by year
+```{r}
+a9<-a4%>%
+group_by(women)%>%
+summarize(N_papers=sum(present_05))
+10158/71866
+```
