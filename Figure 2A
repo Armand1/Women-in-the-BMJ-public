@@ -1,0 +1,247 @@
+---
+title: "incidence of words by pubdate"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readr)
+library(data.table)
+library(reshape2)
+library(dplyr)
+library(ggplot2)
+library(splus2R)
+library(stringi)
+library(broom)
+library(lubridate)
+library(tidyr)
+library(mgcv)
+```
+
+#### preamble
+This models the *incidence* of some word in the papers published at some date. So: choose a word and a date, examine the papers published at that date, and it tells you the frequency of that word among them.
+
+#### data
+get the word count data
+```{r}
+a<-fread("BMJ_011219_wordsbypapers_edited.csv")
+`````
+First convert "woman" to "women" so that they get modelled together
+````````{r}
+a$word<-ifelse(a$word=="woman", "women", a$word)
+a$word<-ifelse(a$word=="man", "men", a$word)
+`````````````
+Note that we have women as duplicates in here so we need to sum them
+```````{r}
+a<-as.data.frame(a)
+a$count<-as.numeric(a$count)
+a1<-a%>%
+group_by(paper_id, year, pub_date, word)%>%
+summarize(N_present=sum(count))%>%
+arrange(pub_date)
+`````````
+get word totals per paper
+`````{r}
+a1<-a1%>%
+group_by(paper_id)%>%
+mutate(N_all=sum(N_present))%>%
+arrange(pub_date)
+``````````
+get the counts of "women" in all papers. Remember that, in our word counts, those that do not have them simply don't appear.  So we need to do some manipulation to ensure that they appear as zeros. 
+
+get the basic data for all papers
+```{r}
+a2<-a1%>%
+select("paper_id", "year", "pub_date", "N_all")
+a2<-distinct(a2)
+nrow(a2)
+```
+get the papers with "women" in them
+```{r}
+a3<-a1%>%
+select("paper_id", "word", "N_present")%>%
+filter(word=="women")%>%
+select("paper_id", "N_present")
+````
+merge and make all NA zero
+```{r}
+a4<-merge(a2, a3, by="paper_id", all.x=TRUE)
+a4[is.na(a4)] <- 0
+```
+get N_absent
+```{r}
+a4$N_absent<-a4$N_all-a4$N_present
+`````
+get decimal pubdate
+```{r}
+a4$pub_date_new<-as.Date(a4$pub_date)
+a4$dec_pub_date<-decimal_date(a4$pub_date_new)
+a4$dec_pub_date<-as.numeric(a4$dec_pub_date)
+```
+get counts by dec_pub_date
+```{r}
+a5<-a4%>%
+group_by(dec_pub_date)%>%
+summarize(N_present=sum(N_present), N_absent=sum(N_absent))
+````
+remove a few papers with no pubdate
+```{r}
+a5<-a5[complete.cases(a5),]
+```
+GLM
+```{r}
+glm<-glm(cbind(N_present, N_absent)~ dec_pub_date, family=binomial, data =a5)
+summary(glm)
+```
+get the odds ratio of the coefficient and its confidence intervals
+```{r}
+glmcoefficient<-as.numeric(exp(coef(glm))[2])
+glmcoefficient
+glmCI<-mean(abs(as.numeric(exp(confint(glm))[2,])-glmcoefficient))
+glmCI
+```
+GAM
+````````{r}
+m5<-gam(cbind(N_present, N_absent)~ s(dec_pub_date), family=binomial, data=a5)
+summary(m5)
+``````````````
+predict
+````````{r}
+dec_pub_date<-sort(sample(unique(a4$dec_pub_date), 1000))
+pred<-as.data.frame(dec_pub_date)
+p1<-predict(glm,pred,se=TRUE, type="response")
+pred$glmfit<-p1$fit
+pred$glmse<-p1$se
+p2<-predict(m5,pred,se=TRUE, type="response")
+pred$gamfit<-p2$fit
+pred$gamse<-p2$se
+```````````
+now get yearly counts
+````````````{r}
+a6<-a4%>%
+group_by(year)%>%
+summarize(N_women=sum(N_present), N_all=sum(N_all))
+a6$F_women=a6$N_women/a6$N_all
+a6$se = sqrt(a6$F_women*(1-a6$F_women)/a6$N_all)
+a6$error<-qnorm(0.975)*a6$se
+````````````````
+
+```````{r}
+#make 5 x 5 inches
+godlee<-decimal_date(as.Date("2005-03-01"))
+ggplot()+
+geom_point(data=a6, aes(x=year, y=F_women), alpha=0.5, colour="hotpink2", size=2)+
+geom_errorbar(data=a6, aes(x=year, ymin=F_women-error, ymax=F_women+error), alpha=0.5, colour="hotpink2", size=1)+
+#first glm  
+geom_line(data=pred, aes(x=dec_pub_date, y=glmfit), alpha=1, size=1, colour="hotpink2")+
+geom_ribbon(data=pred, aes(x=dec_pub_date, ymin=glmfit-glmse, ymax=glmfit+glmse),alpha=0.5, size=1, fill="hotpink2")+
+# gam  
+geom_line(data=pred, aes(x=dec_pub_date, y=gamfit), alpha=1, size=1, linetype = "solid", colour="hotpink2")+
+geom_ribbon(data=pred, aes(x=dec_pub_date, ymin=gamfit-gamse, ymax=gamfit+gamse),alpha=0.5, size=1, fill="hotpink2")+
+  
+theme_classic()+
+scale_y_continuous(limits=c(0, 0.007), breaks = seq(0, 0.011, by = 0.001))+
+scale_x_continuous(breaks = seq(1945, 2015, by = 10))+
+ylab("incidence")+
+theme(aspect.ratio=1)+
+#geom_hline(yintercept = 0, colour="grey50", size=1)+
+geom_vline(xintercept=godlee, colour="grey50", size=1)
+``````````
+This reproduces Figure 1A
+
+#### model men
+
+get the counts of "men" in all papers. Remember that in our word counts, those that do not have them simply don't appear.  So we need to do some manipulation to ensure that they appear as zeros. 
+
+get the basic data for all papers
+
+get the men's papers
+```{r}
+a3<-a1%>%
+select("paper_id", "word", "N_present")%>%
+filter(word=="men")%>%
+select("paper_id", "N_present")
+````
+merge and make all NA zero
+```{r}
+a4<-merge(a2, a3, by="paper_id", all.x=TRUE)
+a4[is.na(a4)]<-0
+```
+get N_absent
+```{r}
+a4$N_absent<-a4$N_all-a4$N_present
+`````
+get decimal pubdate
+```{r}
+a4$pub_date_new<-as.Date(a4$pub_date)
+a4$dec_pub_date<-decimal_date(a4$pub_date_new)
+a4$dec_pub_date<-as.numeric(a4$dec_pub_date)
+```
+get counts by dec_pub_date
+```{r}
+a5<-a4%>%
+group_by(dec_pub_date)%>%
+summarize(N_present=sum(N_present), N_absent=sum(N_absent))
+````
+remove a few papers with no pubdate
+```{r}
+a5<-a5[complete.cases(a5),]
+```
+GLM
+```{r}
+glm<-glm(cbind(N_present, N_absent)~ dec_pub_date, family=binomial, data =a5)
+summary(glm)
+```
+get the odds ratio of the coefficient and its confidence intervals
+```{r}
+glmcoefficient<-as.numeric(exp(coef(glm))[2])
+glmcoefficient
+glmCI<-mean(abs(as.numeric(exp(confint(glm))[2,])-glmcoefficient))
+glmCI
+```
+GAM
+````````{r}
+m5<-gam(cbind(N_present, N_absent)~ s(dec_pub_date), family=binomial, data=a5)
+summary(m5)
+``````````````
+predict
+````````{r}
+dec_pub_date<-sort(sample(unique(a4$dec_pub_date), 1000))
+pred<-as.data.frame(dec_pub_date)
+p1<-predict(glm,pred,se=TRUE, type="response")
+pred$glmfit<-p1$fit
+pred$glmse<-p1$se
+p2<-predict(m5,pred,se=TRUE, type="response")
+pred$gamfit<-p2$fit
+pred$gamse<-p2$se
+```````````
+now get yearly counts
+````````````{r}
+a6<-a4%>%
+group_by(year)%>%
+summarize(N_men=sum(N_present), N_all=sum(N_all))
+a6$F_men=a6$N_men/a6$N_all
+a6$se = sqrt(a6$F_men*(1-a6$F_men)/a6$N_all)
+a6$error<-qnorm(0.975)*a6$se
+````````````````
+
+```````{r}
+godlee<-decimal_date(as.Date("2005-03-01"))
+ggplot()+
+geom_point(data=a6, aes(x=year, y=F_men), alpha=0.5, colour="hotpink2", size=2)+
+geom_errorbar(data=a6, aes(x=year, ymin=F_men-error, ymax=F_men+error), alpha=0.5, colour="hotpink2", size=1)+
+#first glm  
+geom_line(data=pred, aes(x=dec_pub_date, y=glmfit), alpha=1, size=1, colour="hotpink2")+
+geom_ribbon(data=pred, aes(x=dec_pub_date, ymin=glmfit-glmse, ymax=glmfit+glmse),alpha=0.5, size=1, fill="hotpink2")+
+# gam  
+geom_line(data=pred, aes(x=dec_pub_date, y=gamfit), alpha=1, size=1, linetype = "solid", colour="hotpink2")+
+geom_ribbon(data=pred, aes(x=dec_pub_date, ymin=gamfit-gamse, ymax=gamfit+gamse),alpha=0.5, size=1, fill="hotpink2")+
+  
+theme_classic()+
+scale_y_continuous(limits=c(0, 0.007), breaks = seq(0, 0.011, by = 0.001))+
+scale_x_continuous(breaks = seq(1945, 2015, by = 10))+
+ylab("incidence")+
+theme(aspect.ratio=1)+
+#geom_hline(yintercept = 0, colour="grey50", size=1)+
+geom_vline(xintercept=godlee, colour="grey50", size=1)
+``````````
